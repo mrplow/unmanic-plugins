@@ -1,0 +1,20 @@
+{
+    "author": "mrplow",
+    "compatibility": [
+        2
+    ],
+    "description": "Captures the modified-date (mtime) of a file before it is processed, and re-applies that same mtime to the resulting output file(s) once processing is complete. Useful for keeping original file dates intact when transcoding/converting media",
+    "defer_dependency_install": false,
+    "icon": "",
+    "id": "preserve_mtime",
+    "name": "Preserve Original Modified Date",
+    "platform": [
+        "all"
+    ],
+    "priorities": {
+        "on_worker_process": 1,
+        "on_postprocessor_task_results": 1
+    },
+    "tags": "mtime,modified date,timestamp,metadata",
+    "version": "1.0.0"
+}
