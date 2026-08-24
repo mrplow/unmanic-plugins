@@ -5,7 +5,7 @@
     ],
     "description": "Captures the modified-date (mtime) of a file before it is processed, and re-applies that same mtime to the resulting output file(s) once processing is complete. Useful for keeping original file dates intact when transcoding/converting media",
     "defer_dependency_install": false,
-    "icon": "",
+    "icon": "https://raw.githubusercontent.com/mrplow/unmanic-plugins/main/source/preserve_mtime/icon.png",
     "id": "preserve_mtime",
     "name": "Preserve Original Modified Date",
     "platform": [
