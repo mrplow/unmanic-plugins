@@ -15,6 +15,7 @@ Runners used:
 """
 import logging
 import os
+from datetime import datetime
 
 from unmanic.libs.unplugins.settings import PluginSettings
 from unmanic.libs.task import TaskDataStore
@@ -23,6 +24,23 @@ logger = logging.getLogger("Unmanic.Plugin.preserve_mtime")
 
 # Key used to store the captured timestamps in the task-scoped data store
 TASK_STATE_KEY = "preserve_mtime.timestamps"
+
+
+def _human_readable(epoch_timestamp):
+    """
+    Format a UNIX epoch timestamp as a readable local date/time string,
+    keeping the raw epoch value alongside it for anyone cross-checking logs.
+
+    :param epoch_timestamp:
+    :return:
+    """
+    try:
+        return "{} (epoch {})".format(
+            datetime.fromtimestamp(epoch_timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+            epoch_timestamp,
+        )
+    except (OSError, OverflowError, ValueError):
+        return "epoch {}".format(epoch_timestamp)
 
 
 class Settings(PluginSettings):
@@ -89,7 +107,16 @@ def on_worker_process(
         "mtime": stat_result.st_mtime,
         "atime": stat_result.st_atime,
     })
-    logger.info("Captured original mtime %s for '%s'", stat_result.st_mtime, original_file_path)
+
+    readable_mtime = _human_readable(stat_result.st_mtime)
+    log_line = "Preserve Original Modified Date - captured original modified date {} for '{}'".format(
+        readable_mtime, original_file_path,
+    )
+    logger.info(log_line)
+    # Also surface this in the worker's live log tail in the WebUI
+    worker_log = data.get('worker_log')
+    if worker_log is not None:
+        worker_log.append("\n{}".format(log_line))
 
     return
 
@@ -138,20 +165,32 @@ def on_postprocessor_task_results(
 
     mtime = stored['mtime']
     atime = stored.get('atime', mtime)
+    readable_mtime = _human_readable(mtime)
 
     destination_files = data.get('destination_files') or []
     if not destination_files:
         logger.debug("No destination files were reported for this task - nothing to apply")
         return
 
+    updated_count = 0
     for destination_file in destination_files:
         if not os.path.exists(destination_file):
             logger.warning("Destination file does not exist, cannot set mtime: '%s'", destination_file)
             continue
         try:
             os.utime(destination_file, (atime, mtime))
-            logger.info("Applied original mtime %s to '%s'", mtime, destination_file)
+            updated_count += 1
+            logger.info(
+                "Preserve Original Modified Date - restored original modified date %s on '%s'",
+                readable_mtime, destination_file,
+            )
         except OSError as e:
             logger.warning("Failed to set mtime on '%s' - %s", destination_file, e)
+
+    if updated_count:
+        logger.info(
+            "Preserve Original Modified Date - completed. Applied original modified date %s to %d file(s)",
+            readable_mtime, updated_count,
+        )
 
     return
