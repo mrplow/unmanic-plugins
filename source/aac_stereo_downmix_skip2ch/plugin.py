@@ -22,13 +22,29 @@
 
 """
 
-import logging, os, subprocess, re, json
+import logging, os, subprocess, re, json, hashlib
 
 from unmanic.libs.unplugins.settings import PluginSettings
 from aac_stereo_downmix_skip2ch.lib.ffmpeg import StreamMapper, Probe, Parser
 
 # Configure plugin logger
 logger = logging.getLogger("Unmanic.Plugin.aac_stereo_downmix_skip2ch")
+
+# Metadata tag key written to processed audio streams, used to detect on later runs
+# whether a stream was already normalized by this plugin with the current settings.
+NORMALIZE_TAG_KEY = 'UNMANIC_AAC_NORMALIZE_SKIP2CH'
+
+
+def get_normalize_tag_value(settings):
+    """
+    Builds a short fingerprint of the current loudnorm/downmix formulas.
+    If either formula setting changes, this value changes too, so streams
+    tagged under old settings are correctly treated as needing reprocessing.
+    """
+    loudnorm_formula = settings.get_setting('loudnorm_formula')
+    downmix_formula = settings.get_setting('downmix_formula')
+    combined = '{}|{}'.format(loudnorm_formula, downmix_formula)
+    return hashlib.sha1(combined.encode('utf-8')).hexdigest()[:12]
 
 
 def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600):
@@ -76,19 +92,19 @@ class Settings(PluginSettings):
         self.form_settings = {
             "force_reencode": {
                 "label": "Always check already-AAC mono/stereo streams for loudness, even if codec/channels are fine "
-                         "(WARNING: this measures loudness on every already-compliant audio stream during library "
-                         "scanning and worker processing, adding a full extra ffmpeg pass per stream even on files "
-                         "that end up being skipped. This can significantly slow down scans and processing on large "
-                         "libraries.)",
+                         "(WARNING: for streams not already tagged as normalized by this plugin, this adds a full "
+                         "extra ffmpeg measurement pass per stream, even on files that end up being skipped. This "
+                         "can significantly slow down scans and processing on large libraries. Streams already "
+                         "tagged by a previous run with matching settings are skipped without re-measuring.)",
             },
             "loudness_tolerance": {
-                "label": "Loudness tolerance in LU (only used when force re-encode is on). "
-                         "How far a stream's measured loudness can be from the -24 LUFS target "
-                         "before it's re-encoded. As a rough guide: ~1 LU is generally the "
-                         "smallest difference most listeners can perceive, ~3 LU is a clearly "
-                         "noticeable difference, ~5+ LU is a large, obvious difference. A lower "
-                         "tolerance re-encodes more files (more accurate, more processing time); "
-                         "a higher tolerance skips more files (faster, allows more loudness drift).",
+                "label": "Loudness tolerance in LU (only used when force re-encode is on, and only for streams not "
+                         "already tagged as normalized). How far a stream's measured loudness can be from the -24 "
+                         "LUFS target before it's re-encoded. As a rough guide: ~1 LU is generally the smallest "
+                         "difference most listeners can perceive, ~3 LU is a clearly noticeable difference, ~5+ LU "
+                         "is a large, obvious difference. A lower tolerance re-encodes more files (more accurate, "
+                         "more processing time); a higher tolerance skips more files (faster, allows more loudness "
+                         "drift).",
             },
             "loudnorm_formula": {
                 "label": "Loudnorm filter (applied to every encoded stream)",
@@ -112,6 +128,11 @@ class PluginStreamMapper(StreamMapper):
         self.set_input_file(abspath)
         self.settings = settings
 
+    def __get_stream_tags(self, stream_info: dict):
+        tags = stream_info.get('tags', {}) or {}
+        # ffprobe tag key casing can vary by container - normalize to lowercase for lookup
+        return {str(k).lower(): v for k, v in tags.items()}
+
     def test_stream_needs_processing(self, stream_info: dict):
         channels = stream_info.get('channels', 2)
         codec_name = stream_info.get('codec_name', '').lower()
@@ -127,9 +148,23 @@ class PluginStreamMapper(StreamMapper):
             # Already AAC + <=2ch, and we're not checking loudness on "fine" files - skip.
             return False
 
-        # Already AAC + <=2ch, but force_reencode is on: only re-encode if loudness is
-        # actually off-target, to avoid a pointless generational-loss re-encode of a
-        # file that's already normalized.
+        # Already AAC + <=2ch, but force_reencode is on. First check if this stream was
+        # already normalized by this plugin under the current settings - if so, skip
+        # without spending time on a measurement pass at all.
+        current_tag_value = get_normalize_tag_value(self.settings)
+        tags = self.__get_stream_tags(stream_info)
+        existing_tag_value = tags.get(NORMALIZE_TAG_KEY.lower())
+        if existing_tag_value == current_tag_value:
+            logger.debug(
+                "Stream already tagged as normalized by this plugin with current settings for '{}' - skipping.".format(
+                    self.abspath
+                )
+            )
+            return False
+
+        # Not tagged (or tagged under different settings) - measure loudness to decide
+        # whether a re-encode is actually necessary, to avoid a pointless generational-loss
+        # re-encode of a file that happens to already be normalized some other way.
         absolute_stream_index = stream_info.get('index')
         measured = measure_integrated_loudness(self.abspath, absolute_stream_index)
         if measured is None:
@@ -171,6 +206,14 @@ class PluginStreamMapper(StreamMapper):
 
         if sample_rate > 48000:
             stream_encoding += ['-ar:a:{}'.format(stream_id), '48000']
+
+        # Tag this stream so future runs can recognize it was already normalized by
+        # this plugin with these exact settings, skipping re-measurement entirely.
+        tag_value = get_normalize_tag_value(self.settings)
+        stream_encoding += [
+            '-metadata:s:a:{}'.format(stream_id),
+            '{}={}'.format(NORMALIZE_TAG_KEY, tag_value),
+        ]
 
         return {
             'stream_mapping':  ['-map', '0:a:{}'.format(stream_id)],
