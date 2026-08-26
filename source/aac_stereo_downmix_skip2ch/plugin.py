@@ -22,7 +22,7 @@
 
 """
 
-import logging, os, subprocess, re, json
+import logging, os, subprocess, re, json, time
 
 from unmanic.libs.unplugins.settings import PluginSettings
 from aac_stereo_downmix_skip2ch.lib.ffmpeg import StreamMapper, Probe, Parser
@@ -46,7 +46,7 @@ NORMALIZE_TAG_VALUE = '1'
 LOUDNORM_TARGET_LUFS = -24.0
 
 
-def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600):
+def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600, heartbeat_interval=20):
     """
     Runs a single ffmpeg analysis pass (no output file written) to measure a stream's
     current integrated loudness in LUFS, using the same loudnorm filter that would be
@@ -54,6 +54,10 @@ def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600):
     via '-map 0:{index}', avoiding any need to track audio-relative stream counters
     separately (since '-map 0:{index}' pulls in exactly one stream, it always becomes
     output stream a:0 regardless of its original position in the file).
+
+    Logs a heartbeat message every `heartbeat_interval` seconds while running, since
+    Unmanic has no visibility into this subprocess (it isn't the exec_command) and would
+    otherwise show 0% / no output for the entire duration of a long measurement.
 
     Returns the measured value as a float, or None if measurement failed or couldn't be
     parsed from ffmpeg's output.
@@ -71,20 +75,42 @@ def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600):
         '-filter:a:0', 'loudnorm=I={}:LRA=7.0:TP=-2.0:print_format=json'.format(LOUDNORM_TARGET_LUFS),
         '-f', 'null', '-',
     ]
+
+    start_time = time.monotonic()
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.info("Loudness measurement timed out after {}s for '{}'".format(timeout, abspath))
-        return None
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except Exception as e:
-        logger.info("Loudness measurement failed to run for '{}': {}".format(abspath, e))
+        logger.info("Loudness measurement failed to start for '{}': {}".format(abspath, e))
         return None
 
-    stderr = result.stderr.decode('utf-8', errors='ignore')
+    stdout_data = b''
+    stderr_data = b''
+    try:
+        while True:
+            try:
+                stdout_data, stderr_data = process.communicate(timeout=heartbeat_interval)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    process.kill()
+                    process.communicate()
+                    logger.info("Loudness measurement timed out after {:.0f}s for '{}'".format(elapsed, abspath))
+                    return None
+                logger.info(
+                    "Still measuring loudness for '{}' - {:.0f}s elapsed...".format(abspath, elapsed)
+                )
+    except Exception as e:
+        process.kill()
+        process.communicate()
+        logger.info("Loudness measurement failed while running for '{}': {}".format(abspath, e))
+        return None
 
-    if result.returncode != 0:
+    stderr = stderr_data.decode('utf-8', errors='ignore')
+
+    if process.returncode != 0:
         logger.debug(
-            "Loudness measurement ffmpeg process exited with code {} for '{}'".format(result.returncode, abspath)
+            "Loudness measurement ffmpeg process exited with code {} for '{}'".format(process.returncode, abspath)
         )
         # Still attempt to parse below - loudnorm sometimes prints stats before a late
         # non-fatal warning bumps the exit code. If parsing fails too, we'll return None.
@@ -97,7 +123,8 @@ def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600):
     try:
         stats = json.loads(match.group(0))
         measured = float(stats.get('input_i'))
-        logger.info("Measured loudness {} LUFS for '{}'".format(measured, abspath))
+        elapsed = time.monotonic() - start_time
+        logger.info("Measured loudness {} LUFS for '{}' (took {:.0f}s)".format(measured, abspath, elapsed))
         return measured
     except (ValueError, TypeError) as e:
         logger.info("Could not parse loudnorm JSON stats for '{}': {}".format(abspath, e))

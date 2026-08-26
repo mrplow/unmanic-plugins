@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.7 (2026-08-26)
+
+- Added heartbeat logging every 20s during loudness measurement, so long files show visible progress in Unmanic's log (at info level) instead of appearing frozen for the full duration of the measurement pass. Progress bar/percentage still won't move during this phase - Unmanic only tracks the exec_command process, and measurement runs before that's set - but the log now confirms it's actively working.
+
 ## 0.0.6 (2026-08-26)
 
 - Performance: library scan no longer runs a full loudness measurement pass per file - it now only checks the (cheap) normalize tag and defers actual measurement to worker time, roughly halving the wait on files with force re-encode enabled.
