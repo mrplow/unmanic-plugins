@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.0.4 (2026-08-25)
+## 0.0.5 (2026-08-25)
+
+- Fixed: a stream that measures within loudness tolerance during a force re-encode check is now tagged as normalized (stream copy + metadata write, no audio re-encode) so it's correctly skipped on future runs. Previously it was left untagged and would be re-measured every run indefinitely.
+- Safety: guarded against a missing/None absolute stream index from ffprobe, falling back to a safe re-encode instead of risking a mismatched tag-only skip or a broken ffmpeg map argument.
+- Robustness: split timeout vs. general failures in the loudness measurement subprocess call for clearer debug logging; added a returncode check that still attempts to parse loudnorm stats before giving up.
+- Cleanup: removed dead duplicate return paths in the loudness/tag decision logic; introduced a LOUDNORM_TARGET_LUFS constant so the measurement target and the default loudnorm formula's stated target are visibly tied together.
+
+## 0.0.4
 
 - Added stream metadata tagging: after a stream is encoded, a fingerprint of the current loudnorm/downmix settings is written to it as a custom tag. On future runs with force re-encode enabled, streams already tagged with a matching fingerprint are skipped without running a loudness measurement pass at all. Changing the loudnorm or downmix formula settings invalidates old tags automatically, so previously-tagged files are correctly reprocessed under new settings.
 

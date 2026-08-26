@@ -34,6 +34,11 @@ logger = logging.getLogger("Unmanic.Plugin.aac_stereo_downmix_skip2ch")
 # whether a stream was already normalized by this plugin with the current settings.
 NORMALIZE_TAG_KEY = 'UNMANIC_AAC_NORMALIZE_SKIP2CH'
 
+# Target integrated loudness used both for encoding and for measurement comparisons.
+# NOTE: kept as a constant here since 'loudnorm_formula' is a free-text setting - if a
+# user changes the I= value in their formula, this constant won't automatically follow it.
+LOUDNORM_TARGET_LUFS = -24.0
+
 
 def get_normalize_tag_value(settings):
     """
@@ -51,31 +56,53 @@ def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600):
     """
     Runs a single ffmpeg analysis pass (no output file written) to measure a stream's
     current integrated loudness in LUFS, using the same loudnorm filter that would be
-    used to encode it. Uses the stream's absolute ffprobe index (stream_info['index'])
-    to select it directly via '-map 0:{index}', avoiding any need to track audio-relative
-    stream counters separately (since '-map 0:{index}' pulls in exactly one stream, it
-    always becomes output stream a:0 regardless of its original position in the file).
+    used to encode it. Uses the stream's absolute ffprobe index to select it directly
+    via '-map 0:{index}', avoiding any need to track audio-relative stream counters
+    separately (since '-map 0:{index}' pulls in exactly one stream, it always becomes
+    output stream a:0 regardless of its original position in the file).
+
     Returns the measured value as a float, or None if measurement failed or couldn't be
     parsed from ffmpeg's output.
     """
+    if absolute_stream_index is None:
+        logger.debug("No absolute stream index available for '{}' - cannot measure loudness.".format(abspath))
+        return None
+
     cmd = [
         'ffmpeg', '-hide_banner', '-nostats',
         '-i', abspath,
         '-map', '0:{}'.format(absolute_stream_index),
-        '-filter:a:0', 'loudnorm=I=-24.0:LRA=7.0:TP=-2.0:print_format=json',
+        '-filter:a:0', 'loudnorm=I={}:LRA=7.0:TP=-2.0:print_format=json'.format(LOUDNORM_TARGET_LUFS),
         '-f', 'null', '-',
     ]
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
-        stderr = result.stderr.decode('utf-8', errors='ignore')
-        match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', stderr, re.DOTALL)
-        if not match:
-            logger.debug("Could not find loudnorm JSON stats in ffmpeg output for '{}'".format(abspath))
-            return None
+    except subprocess.TimeoutExpired:
+        logger.debug("Loudness measurement timed out after {}s for '{}'".format(timeout, abspath))
+        return None
+    except Exception as e:
+        logger.debug("Loudness measurement failed to run for '{}': {}".format(abspath, e))
+        return None
+
+    stderr = result.stderr.decode('utf-8', errors='ignore')
+
+    if result.returncode != 0:
+        logger.debug(
+            "Loudness measurement ffmpeg process exited with code {} for '{}'".format(result.returncode, abspath)
+        )
+        # Still attempt to parse below - loudnorm sometimes prints stats before a late
+        # non-fatal warning bumps the exit code. If parsing fails too, we'll return None.
+
+    match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', stderr, re.DOTALL)
+    if not match:
+        logger.debug("Could not find loudnorm JSON stats in ffmpeg output for '{}'".format(abspath))
+        return None
+
+    try:
         stats = json.loads(match.group(0))
         return float(stats.get('input_i'))
-    except Exception as e:
-        logger.debug("Loudness measurement failed for '{}': {}".format(abspath, e))
+    except (ValueError, TypeError) as e:
+        logger.debug("Could not parse loudnorm JSON stats for '{}': {}".format(abspath, e))
         return None
 
 
@@ -121,14 +148,20 @@ class PluginStreamMapper(StreamMapper):
         self.encoder = 'aac'
         self.settings = None
         self.abspath = None
+        # Tracks streams that measured within tolerance during force_reencode checks -
+        # these get tagged-but-copied in custom_stream_mapping rather than re-encoded.
+        # Keyed by absolute ffprobe stream index. Reset per-file in set_default_values.
+        self.tag_only_streams = {}
 
     def set_default_values(self, settings, abspath, probe):
         self.abspath = abspath
         self.set_probe(probe)
         self.set_input_file(abspath)
         self.settings = settings
+        self.tag_only_streams = {}
 
-    def __get_stream_tags(self, stream_info: dict):
+    @staticmethod
+    def __get_stream_tags(stream_info: dict):
         tags = stream_info.get('tags', {}) or {}
         # ffprobe tag key casing can vary by container - normalize to lowercase for lookup
         return {str(k).lower(): v for k, v in tags.items()}
@@ -162,14 +195,21 @@ class PluginStreamMapper(StreamMapper):
             )
             return False
 
-        # Not tagged (or tagged under different settings) - measure loudness to decide
-        # whether a re-encode is actually necessary, to avoid a pointless generational-loss
-        # re-encode of a file that happens to already be normalized some other way.
         absolute_stream_index = stream_info.get('index')
+        if absolute_stream_index is None:
+            # Can't reliably measure or correlate this stream without its index -
+            # re-encode to be safe rather than risk a mismatched tag-only skip.
+            logger.debug(
+                "Stream has no absolute index reported by ffprobe for '{}' - re-encoding to be safe.".format(
+                    self.abspath
+                )
+            )
+            return True
+
         measured = measure_integrated_loudness(self.abspath, absolute_stream_index)
         if measured is None:
-            # Measurement failed - fall back to re-encoding to be safe rather than
-            # silently skipping a file we couldn't verify.
+            # Measurement failed - re-encode to be safe rather than silently skipping
+            # a file we couldn't verify.
             return True
 
         try:
@@ -177,17 +217,38 @@ class PluginStreamMapper(StreamMapper):
         except (TypeError, ValueError):
             tolerance = 1.0
 
-        target = -24.0
-        needs_reencode = abs(measured - target) > tolerance
+        needs_reencode = abs(measured - LOUDNORM_TARGET_LUFS) > tolerance
         logger.debug(
             "Measured loudness {} LUFS for '{}' (target {}, tolerance {}) - {}".format(
-                measured, self.abspath, target, tolerance,
-                "re-encoding" if needs_reencode else "skipping"
+                measured, self.abspath, LOUDNORM_TARGET_LUFS, tolerance,
+                "re-encoding" if needs_reencode else "already within tolerance, tagging only"
             )
         )
-        return needs_reencode
+
+        if not needs_reencode:
+            # Already within tolerance - no need to re-encode audio, but custom_stream_mapping
+            # still needs to run so it can stamp the tag and avoid re-measuring next time.
+            self.tag_only_streams[absolute_stream_index] = current_tag_value
+
+        return True
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
+        absolute_stream_index = stream_info.get('index')
+        tag_only_value = self.tag_only_streams.get(absolute_stream_index) if absolute_stream_index is not None else None
+
+        if tag_only_value is not None:
+            # Stream already measured as within tolerance - just copy it and stamp the
+            # tag, no re-encode needed. Avoids pointless generational loss on a file
+            # that's already normalized.
+            return {
+                'stream_mapping':  ['-map', '0:a:{}'.format(stream_id)],
+                'stream_encoding': [
+                    '-c:a:{}'.format(stream_id), 'copy',
+                    '-metadata:s:a:{}'.format(stream_id),
+                    '{}={}'.format(NORMALIZE_TAG_KEY, tag_only_value),
+                ],
+            }
+
         channels = stream_info.get('channels', 2)
         sample_rate = int(stream_info.get('sample_rate', 48000))
 
@@ -207,8 +268,6 @@ class PluginStreamMapper(StreamMapper):
         if sample_rate > 48000:
             stream_encoding += ['-ar:a:{}'.format(stream_id), '48000']
 
-        # Tag this stream so future runs can recognize it was already normalized by
-        # this plugin with these exact settings, skipping re-measurement entirely.
         tag_value = get_normalize_tag_value(self.settings)
         stream_encoding += [
             '-metadata:s:a:{}'.format(stream_id),
