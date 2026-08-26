@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.6 (2026-08-26)
+
+- Performance: library scan no longer runs a full loudness measurement pass per file - it now only checks the (cheap) normalize tag and defers actual measurement to worker time, roughly halving the wait on files with force re-encode enabled.
+- Changed the normalize tag from an opaque settings hash to a plain presence marker (UNMANIC_AAC_NORMALIZE_SKIP2CH=1). Once a stream is tagged normalized, it is now permanently skipped on all future runs, even if loudnorm_formula or downmix_formula are changed afterward - avoids a second lossy re-encode of already-normalized audio. To force a re-check, the tag must be removed from the file manually.
+- Loudness measurement start/result logs are now visible at info level instead of debug, so the multi-minute worker pause during measurement shows activity in Unmanic's log instead of appearing stuck.
+
 ## 0.0.5 (2026-08-25)
 
 - Fixed: a stream that measures within loudness tolerance during a force re-encode check is now tagged as normalized (stream copy + metadata write, no audio re-encode) so it's correctly skipped on future runs. Previously it was left untagged and would be re-measured every run indefinitely.
