@@ -1,0 +1,20 @@
+{
+    "author": "mrplow",
+    "compatibility": [
+        2
+    ],
+    "description": "Captures the modified-date (mtime) of a file before it is processed, and re-applies that same mtime to the resulting output file(s) once processing is complete. Useful for keeping original file dates intact when transcoding/converting media, so tools that sort or track files by modified date aren't confused by the new file appearing 'freshly modified'.",
+    "defer_dependency_install": false,
+    "icon": "https://raw.githubusercontent.com/mrplow/unmanic-plugins/main/source/preserve_mtime/icon.png",
+    "id": "preserve_mtime",
+    "name": "Preserve Original Modified Date",
+    "platform": [
+        "all"
+    ],
+    "priorities": {
+        "on_worker_process": 1,
+        "on_postprocessor_task_results": 1
+    },
+    "tags": "mtime,modified date,timestamp,metadata",
+    "version": "1.1.0"
+}

@@ -1,0 +1,19 @@
+{
+    "author": "k29t59dh, mrplow",
+    "compatibility": [
+        1,
+        2
+    ],
+    "description": "Normalizes audio in a single pass: skips streams already AAC mono/stereo (unless force re-encode is enabled), encodes non-AAC mono/stereo streams to AAC with loudnorm, and downmixes any stream with more than 2 channels to stereo AAC with loudnorm. Caps sample rate at 48kHz, leaves lower rates untouched. Optional force re-encode mode checks loudness on already-compliant streams and only re-encodes if off-target, permanently tagging normalized streams so they are never re-measured or re-encoded again, even if formula settings change later.",
+    "icon": "https://raw.githubusercontent.com/k29t59dh/unmanic-plugins/master/source/aac_stereo_downmix/icon.png",
+    "id": "aac_stereo_downmix_skip2ch",
+    "name": "AAC Stereo Downmix Skip 2ch",
+    "platform": [
+        "all"
+    ],
+    "priorities": {
+        "on_worker_process": 3
+    },
+    "tags": "video,ffmpeg",
+    "version": "0.0.7"
+}

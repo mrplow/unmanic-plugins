@@ -1,0 +1,69 @@
+{
+    "repo": {
+        "id": "repository.mrplow",
+        "name": "mrplow's Unmanic Plugins",
+        "icon": "",
+        "repo_data_directory": "https://raw.githubusercontent.com/mrplow/unmanic-plugins/repo/",
+        "repo_data_url": "https://raw.githubusercontent.com/mrplow/unmanic-plugins/repo/repo.json"
+    },
+    "plugins": [
+        {
+            "author": "k29t59dh, mrplow",
+            "compatibility": [
+                1,
+                2
+            ],
+            "description": "Normalizes audio in a single pass: skips streams already AAC mono/stereo (unless force re-encode is enabled), encodes non-AAC mono/stereo streams to AAC with loudnorm, and downmixes any stream with more than 2 channels to stereo AAC with loudnorm. Caps sample rate at 48kHz, leaves lower rates untouched. Optional force re-encode mode checks loudness on already-compliant streams and only re-encodes if off-target, permanently tagging normalized streams so they are never re-measured or re-encoded again, even if formula settings change later.",
+            "icon": "https://raw.githubusercontent.com/k29t59dh/unmanic-plugins/master/source/aac_stereo_downmix/icon.png",
+            "id": "aac_stereo_downmix_skip2ch",
+            "name": "AAC Stereo Downmix Skip 2ch",
+            "platform": [
+                "all"
+            ],
+            "priorities": {
+                "on_worker_process": 3
+            },
+            "tags": "video,ffmpeg",
+            "version": "0.0.7"
+        },
+        {
+            "author": "mrplow",
+            "compatibility": [
+                2
+            ],
+            "description": "Captures the modified-date (mtime) of a file before it is processed, and re-applies that same mtime to the resulting output file(s) once processing is complete. Useful for keeping original file dates intact when transcoding/converting media, so tools that sort or track files by modified date aren't confused by the new file appearing 'freshly modified'.",
+            "defer_dependency_install": false,
+            "icon": "https://raw.githubusercontent.com/mrplow/unmanic-plugins/main/source/preserve_mtime/icon.png",
+            "id": "preserve_mtime",
+            "name": "Preserve Original Modified Date",
+            "platform": [
+                "all"
+            ],
+            "priorities": {
+                "on_worker_process": 1,
+                "on_postprocessor_task_results": 1
+            },
+            "tags": "mtime,modified date,timestamp,metadata",
+            "version": "1.1.0"
+        },
+        {
+            "author": "Josh.5, mrplow added genpts",
+            "compatibility": [
+                1,
+                2
+            ],
+            "description": "Remux a video file to the configured container",
+            "icon": "https://raw.githubusercontent.com/Josh5/unmanic.plugin.video_remuxer/master/icon.png",
+            "id": "video_remuxer_genpts",
+            "name": "Remux Video Files (genpts)",
+            "platform": [
+                "all"
+            ],
+            "priorities": {
+                "on_worker_process": 3
+            },
+            "tags": "video,ffmpeg",
+            "version": "0.0.1"
+        }
+    ]
+}
