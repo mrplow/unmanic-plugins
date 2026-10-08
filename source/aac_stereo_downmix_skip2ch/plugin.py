@@ -46,7 +46,99 @@ NORMALIZE_TAG_VALUE = '1'
 LOUDNORM_TARGET_LUFS = -24.0
 
 
-def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600, heartbeat_interval=20):
+
+def detect_final_sample_format_change(abspath, absolute_stream_index, duration, timeout=60):
+    """
+    Detect a final audio frame whose sample format differs from the preceding
+    frame. Returns the final frame timestamp when detected, otherwise None.
+    """
+    try:
+        duration = float(duration)
+    except (TypeError, ValueError):
+        return None
+
+    if duration <= 0:
+        return None
+
+    interval_start = max(0.0, duration - 0.5)
+    interval_end = duration + 0.15
+
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'a',
+        '-read_intervals', '{}%{}'.format(interval_start, interval_end),
+        '-show_entries',
+        'frame=stream_index,best_effort_timestamp_time,sample_fmt',
+        '-of', 'csv=p=0',
+        abspath,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug(
+            "Unable to inspect final audio frames for '{}': {}".format(
+                abspath, exc
+            )
+        )
+        return None
+
+    if result.returncode != 0:
+        logger.debug(
+            "ffprobe final-frame inspection failed for '{}': {}".format(
+                abspath, result.stderr.strip()
+            )
+        )
+        return None
+
+    frames = []
+
+    for line in result.stdout.splitlines():
+        fields = line.split(',')
+        if len(fields) < 3:
+            continue
+
+        try:
+            stream_index = int(fields[0])
+            timestamp = float(fields[1])
+        except (TypeError, ValueError):
+            continue
+
+        sample_fmt = fields[2].strip()
+
+        if stream_index == absolute_stream_index and sample_fmt:
+            frames.append((timestamp, sample_fmt))
+
+    if len(frames) < 2:
+        return None
+
+    previous_timestamp, previous_format = frames[-2]
+    final_timestamp, final_format = frames[-1]
+
+    if previous_format != final_format:
+        logger.debug(
+            "Detected final audio sample format change for '{}': "
+            "{} at {:.6f}s -> {} at {:.6f}s; trimming at {:.6f}s".format(
+                abspath,
+                previous_format,
+                previous_timestamp,
+                final_format,
+                final_timestamp,
+                final_timestamp,
+            )
+        )
+        return final_timestamp
+
+    return None
+
+def measure_integrated_loudness(abspath, absolute_stream_index, trim_point=None, timeout=600, heartbeat_interval=20):
     """
     Runs a single ffmpeg analysis pass (no output file written) to measure a stream's
     current integrated loudness in LUFS, using the same loudnorm filter that would be
@@ -68,11 +160,20 @@ def measure_integrated_loudness(abspath, absolute_stream_index, timeout=600, hea
 
     logger.info("Measuring loudness for stream index {} of '{}'...".format(absolute_stream_index, abspath))
 
+    loudnorm_filter = 'loudnorm=I={}:LRA=7.0:TP=-2.0:print_format=json'.format(
+        LOUDNORM_TARGET_LUFS
+    )
+
+    if trim_point is not None:
+        filter_formula = 'atrim=end={:.6f},{}'.format(trim_point, loudnorm_filter)
+    else:
+        filter_formula = loudnorm_filter
+
     cmd = [
         'ffmpeg', '-hide_banner', '-nostats',
         '-i', abspath,
         '-map', '0:{}'.format(absolute_stream_index),
-        '-filter:a:0', 'loudnorm=I={}:LRA=7.0:TP=-2.0:print_format=json'.format(LOUDNORM_TARGET_LUFS),
+        '-filter:a:0', filter_formula,
         '-f', 'null', '-',
     ]
 
@@ -183,6 +284,7 @@ class PluginStreamMapper(StreamMapper):
         # these get tagged-but-copied in custom_stream_mapping rather than re-encoded.
         # Keyed by absolute ffprobe stream index. Reset per-file in set_default_values.
         self.tag_only_streams = set()
+        self.final_frame_trim_points = {}
 
     def set_default_values(self, settings, abspath, probe, allow_measurement=True):
         self.abspath = abspath
@@ -191,6 +293,7 @@ class PluginStreamMapper(StreamMapper):
         self.settings = settings
         self.allow_measurement = allow_measurement
         self.tag_only_streams = set()
+        self.final_frame_trim_points = {}
 
     @staticmethod
     def __get_stream_tags(stream_info: dict):
@@ -202,6 +305,24 @@ class PluginStreamMapper(StreamMapper):
         tags = self.__get_stream_tags(stream_info)
         return tags.get(NORMALIZE_TAG_KEY.lower()) == NORMALIZE_TAG_VALUE
 
+    def __get_final_frame_trim_point(self, absolute_stream_index):
+        if absolute_stream_index in self.final_frame_trim_points:
+            return self.final_frame_trim_points[absolute_stream_index]
+
+        duration = self.probe.get('format', {}).get('duration')
+        if duration is None:
+            self.final_frame_trim_points[absolute_stream_index] = None
+            return None
+
+        trim_point = detect_final_sample_format_change(
+            self.abspath,
+            absolute_stream_index,
+            duration,
+        )
+
+        self.final_frame_trim_points[absolute_stream_index] = trim_point
+        return trim_point
+
     def test_stream_needs_processing(self, stream_info: dict):
         channels = stream_info.get('channels', 2)
         codec_name = stream_info.get('codec_name', '').lower()
@@ -211,6 +332,10 @@ class PluginStreamMapper(StreamMapper):
         if not already_aac_and_stereo_or_less:
             # Codec conversion or downmix is needed regardless of loudness - no point
             # spending time measuring, it's getting re-encoded either way.
+            if self.allow_measurement:
+                absolute_stream_index = stream_info.get('index')
+                if absolute_stream_index is not None:
+                    self.__get_final_frame_trim_point(absolute_stream_index)
             return True
 
         if not self.settings.get_setting('force_reencode'):
@@ -248,7 +373,14 @@ class PluginStreamMapper(StreamMapper):
             )
             return True
 
-        measured = measure_integrated_loudness(self.abspath, absolute_stream_index)
+        trim_point = self.__get_final_frame_trim_point(absolute_stream_index)
+
+        measured = measure_integrated_loudness(
+            self.abspath,
+            absolute_stream_index,
+            trim_point=trim_point,
+        )
+
         if measured is None:
             # Measurement failed - re-encode to be safe rather than silently skipping
             # a file we couldn't verify.
@@ -302,13 +434,19 @@ class PluginStreamMapper(StreamMapper):
         else:
             filter_formula = loudnorm_formula
 
+        trim_point = self.final_frame_trim_points.get(absolute_stream_index)
+        if trim_point is not None:
+            filter_formula = 'atrim=end={:.6f},{}'.format(
+                trim_point,
+                filter_formula,
+            )
+
         stream_encoding = [
             '-c:a:{}'.format(stream_id), self.encoder,
             '-filter:a:{}'.format(stream_id), filter_formula,
         ]
 
-        if sample_rate > 48000:
-            stream_encoding += ['-ar:a:{}'.format(stream_id), '48000']
+        stream_encoding += ['-ar:a:{}'.format(stream_id), '48000']
 
         stream_encoding += [
             '-metadata:s:a:{}'.format(stream_id),
