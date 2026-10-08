@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.8 (2026-10-08)
+
+- Fixed: loudness normalization could fail on files whose final audio frame changed sample format, causing the filter graph to be reconfigured and the AAC encoder to encounter invalid samples. The plugin now detects this final-frame format change and trims the audio before normalization.
+- Fixed: newly encoded audio is now always explicitly resampled to 48kHz. Previously, 48kHz sources could unexpectedly produce 96kHz output after loudnorm processing.
+
 ## 0.0.7 (2026-08-26)
 
 - Added heartbeat logging every 20s during loudness measurement, so long files show visible progress in Unmanic's log (at info level) instead of appearing frozen for the full duration of the measurement pass. Progress bar/percentage still won't move during this phase - Unmanic only tracks the exec_command process, and measurement runs before that's set - but the log now confirms it's actively working.
