@@ -1,0 +1,15 @@
+{
+    "author": "mrplow",
+    "compatibility": [2],
+    "defer_dependency_install": false,
+    "description": "Wait for a configurable period before Unmanic processes each file.",
+    "icon": "https://raw.githubusercontent.com/mrplow/unmanic-plugins/main/source/worker_processing_delay/icon.png",
+    "id": "worker_processing_delay",
+    "name": "Worker Processing Delay",
+    "platform": ["all"],
+    "priorities": {
+        "on_worker_process": 1
+    },
+    "tags": ["worker", "delay", "processing"],
+    "version": "1.0.0"
+}
